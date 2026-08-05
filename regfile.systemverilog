@@ -1,0 +1,41 @@
+// ============================================================================
+// MODULE: Register File
+// DESCRIPTION: 32 x 64-bit general purpose registers for the RISC-V core.
+//              Register x0 is hardwired to zero.
+// ============================================================================
+
+module regfile (
+    input  logic        clk,
+    input  logic        write_en,   // Signal to allow writing
+    input  logic [4:0]  rs1_addr,   // 5-bit address for Source 1 (reads x0-x31)
+    input  logic [4:0]  rs2_addr,   // 5-bit address for Source 2 (reads x0-x31)
+    input  logic [4:0]  rd_addr,    // 5-bit address for Destination (writes)
+    input  logic [63:0] write_data, // The 64-bit data to write into the destination
+    output logic [63:0] rs1_data,   // 64-bit data out for Source 1
+    output logic [63:0] rs2_data    // 64-bit data out for Source 2
+);
+
+    // Create an array of 32 registers, each 64 bits wide
+    logic [63:0] registers [31:0];
+
+    // --------------------------------------------------------
+    // Write Logic (Synchronous - updates on the clock tick)
+    // --------------------------------------------------------
+    always_ff @(posedge clk) begin
+        // We only write data if the enable signal is high.
+        // RISC-V Rule: Register 0 (x0) cannot be overwritten.
+        if (write_en && (rd_addr != 5'd0)) begin
+            registers[rd_addr] <= write_data;
+        end
+    end
+
+    // --------------------------------------------------------
+    // Read Logic (Asynchronous - flows immediately to the ALU)
+    // --------------------------------------------------------
+    // If the core asks for register 0, we force the output to 0.
+    // Otherwise, we output whatever is stored in the requested register.
+    
+    assign rs1_data = (rs1_addr == 5'd0) ? 64'd0 : registers[rs1_addr];
+    assign rs2_data = (rs2_addr == 5'd0) ? 64'd0 : registers[rs2_addr];
+
+endmodule

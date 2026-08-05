@@ -1,0 +1,81 @@
+// ============================================================================
+// MODULE: Unified Memory Controller
+// FILE: unified_memory_controller.systemverilog
+// DESCRIPTION: Manages the 512-bit memory bus for 1,000 cores. Uses a 
+//              Round-Robin state machine to grant access fairly.
+// ============================================================================
+4
+module unified_memory_controller #(
+    parameter NUM_CORES = 1000
+)(
+    input  logic clk,
+    input  logic reset,
+    mem_bus_if   core_buses[NUM_CORES] 
+);
+
+    typedef enum logic [1:0] {
+        SCAN,   // Rapidly checking which core needs memory
+        ACCESS, // Waiting for the physical memory
+        FINISH  // Sending the "Ready" signal back
+    } arbiter_state_t;
+
+    arbiter_state_t state;
+    logic [9:0] current_core; 
+    logic [3:0] latency_timer; 
+
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            state         <= SCAN;
+            current_core  <= 10'd0;
+            latency_timer <= 4'd0;
+            
+            for (int i = 0; i < NUM_CORES; i++) begin
+                core_buses[i].ready <= 1'b0;
+                core_buses[i].rdata <= 512'b0;
+            end
+        end else begin
+            
+            for (int i = 0; i < NUM_CORES; i++) begin
+                core_buses[i].ready <= 1'b0;
+            end
+
+            case (state)
+                SCAN: begin
+                    if (core_buses[current_core].read_en || core_buses[current_core].write_en) begin
+                        state         <= ACCESS;
+                        latency_timer <= 4'd5; // Simulate a 5 clock-cycle delay
+                    end else begin
+                        if (current_core == NUM_CORES - 1)
+                            current_core <= 10'd0;
+                        else
+                            current_core <= current_core + 1'b1;
+                    end
+                end
+
+                ACCESS: begin
+                    if (latency_timer > 0) begin
+                        latency_timer <= latency_timer - 1'b1;
+                    end else begin
+                        if (core_buses[current_core].read_en) begin
+                            // Return a dummy NOP instruction (ADDI x0, x0, 0)
+                            core_buses[current_core].rdata <= {480'b0, 32'h00000013};
+                        end
+                        state <= FINISH;
+                    end
+                end
+
+                FINISH: begin
+                    core_buses[current_core].ready <= 1'b1;
+                    
+                    if (current_core == NUM_CORES - 1)
+                        current_core <= 10'd0;
+                    else
+                        current_core <= current_core + 1'b1;
+                        
+                    state <= SCAN;
+                end
+            endcase
+        end
+    end
+
+endmodule

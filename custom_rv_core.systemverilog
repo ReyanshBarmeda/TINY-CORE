@@ -1,0 +1,160 @@
+// ============================================================================
+// MODULE: Custom RISC-V Core
+// DESCRIPTION: The top-level wrapper for a single RISC-V core. Integrates
+//              the ALU, RegFile, Control Unit, and ImmGen, and drives the 
+//              unified memory bus using a 2-stage Fetch/Execute FSM.
+// ============================================================================
+
+module custom_rv_core (
+    input  logic        clk,
+    input  logic        reset,
+    input  logic [15:0] core_id,  // Unique ID for this core (0 to 999)
+    mem_bus_if          mem       // The connection to the 120GB unified memory
+);
+
+    // ------------------------------------------------------------------------
+    // INTERNAL SIGNALS & WIRES
+    // ------------------------------------------------------------------------
+    logic [39:0] pc;
+    logic [39:0] next_pc;
+    logic [31:0] instruction;     // The fetched 32-bit instruction
+    
+    // Control Unit Wires
+    logic       ctrl_reg_write;
+    logic [3:0] ctrl_alu_op;
+    logic       ctrl_alu_src;
+    logic       ctrl_mem_read;
+    logic       ctrl_mem_write;
+    logic       ctrl_branch;
+    logic       ctrl_result_src;
+
+    // Immediate Generator Wires
+    logic [63:0] imm_ext;
+
+    // Register File Wires
+    logic [63:0] rs1_data;
+    logic [63:0] rs2_data;
+    logic [63:0] write_data;
+
+    // ALU Wires
+    logic [63:0] alu_operand_b;
+    logic [63:0] alu_result;
+    logic        alu_zero;
+
+    // ------------------------------------------------------------------------
+    // MODULE INSTANTIATIONS (Stamping down the hardware blocks)
+    // ------------------------------------------------------------------------
+
+    control_unit u_control (
+        .instruction(instruction),
+        .reg_write_en(ctrl_reg_write),
+        .alu_op(ctrl_alu_op),
+        .alu_src(ctrl_alu_src),
+        .mem_read(ctrl_mem_read),
+        .mem_write(ctrl_mem_write),
+        .branch(ctrl_branch),
+        .result_src(ctrl_result_src)
+    );
+
+    imm_gen u_imm_gen (
+        .instruction(instruction),
+        .imm_ext(imm_ext)
+    );
+
+    // Only write to the register file during the EXECUTE stage
+    logic actual_reg_write;
+
+    regfile u_regfile (
+        .clk(clk),
+        .write_en(actual_reg_write), 
+        .rs1_addr(instruction[19:15]),
+        .rs2_addr(instruction[24:20]),
+        .rd_addr(instruction[11:7]),
+        .write_data(write_data),
+        .rs1_data(rs1_data),
+        .rs2_data(rs2_data)
+    );
+
+    // Multiplexer: Choose between Register 2 or the Immediate value for the ALU
+    assign alu_operand_b = (ctrl_alu_src) ? imm_ext : rs2_data;
+
+    alu u_alu (
+        .rs1_data(rs1_data),
+        .rs2_data(alu_operand_b),
+        .alu_op(ctrl_alu_op),
+        .alu_result(alu_result),
+        .zero(alu_zero)
+    );
+
+    // Multiplexer: Choose between ALU math result or Memory read data to save in register
+    // Note: mem.rdata is 512 bits, we just take the bottom 64 bits for standard RV64 data
+    assign write_data = (ctrl_result_src) ? mem.rdata[63:0] : alu_result;
+
+    // Branch Logic: If it's a branch instruction AND the ALU says the registers are equal
+    logic take_branch;
+    assign take_branch = ctrl_branch & alu_zero;
+    assign next_pc = take_branch ? (pc + imm_ext[39:0]) : (pc + 4);
+
+    // ------------------------------------------------------------------------
+    // FINITE STATE MACHINE (FSM) - Fetch and Execute Cycles
+    // ------------------------------------------------------------------------
+    typedef enum logic {FETCH, EXECUTE} state_t;
+    state_t state, next_state;
+
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            state <= FETCH;
+            pc <= 40'h0; // Start booting at address 0
+            instruction <= 32'h0;
+            mem.read_en <= 1'b0;
+            mem.write_en <= 1'b0;
+        end else begin
+            case (state)
+                
+                FETCH: begin
+                    // Ask memory for the instruction at the current PC
+                    mem.addr <= pc;
+                    mem.read_en <= 1'b1;
+                    mem.write_en <= 1'b0;
+                    actual_reg_write <= 1'b0; // Don't overwrite registers while fetching
+
+                    // When memory says the 512-bit data is ready, slice out our 32-bit instruction
+                    if (mem.ready) begin
+                        instruction <= mem.rdata[31:0]; 
+                        mem.read_en <= 1'b0;
+                        state <= EXECUTE;
+                    end
+                end
+
+                EXECUTE: begin
+                    if (ctrl_mem_read || ctrl_mem_write) begin
+                        // It is a LOAD or STORE instruction. We must talk to memory again.
+                        mem.addr <= alu_result[39:0]; // ALU calculated the memory address
+                        
+                        // If writing, put rs2 data onto the bottom of the 512-bit bus
+                        mem.wdata <= {448'b0, rs2_data}; 
+                        
+                        mem.read_en <= ctrl_mem_read;
+                        mem.write_en <= ctrl_mem_write;
+
+                        if (mem.ready) begin
+                            // Memory operation finished
+                            actual_reg_write <= ctrl_reg_write; 
+                            pc <= next_pc;
+                            mem.read_en <= 1'b0;
+                            mem.write_en <= 1'b0;
+                            state <= FETCH;
+                        end
+                    end else begin
+                        // It's standard math/logic. No memory access needed.
+                        actual_reg_write <= ctrl_reg_write;
+                        pc <= next_pc;
+                        state <= FETCH;
+                    end
+                end
+
+            endcase
+        end
+    end
+
+endmodule

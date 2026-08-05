@@ -1,0 +1,64 @@
+// ============================================================================
+// MODULE: Top-Level Testbench
+// FILE: tb_massive_soc.sv
+// DESCRIPTION: Simulates the 1000-Core SoC booting up. Generates clock
+//              and reset signals and dumps waveforms for debugging.
+// ============================================================================
+`timescale 1ns / 1ps
+
+module tb_massive_soc;
+
+    // 1. Declare signals to act as our virtual power and clock lines
+    logic clk;
+    logic reset;
+
+    // 2. Instantiate the Device Under Test (DUT)
+    // This is our massive 1000-core motherboard
+    top_level_chip u_dut (
+        .clk(clk),
+        .reset(reset)
+    );
+
+    // 3. Clock Generator
+    // Toggle the clock every 5 nanoseconds (creating a 100MHz clock)
+    initial begin
+        clk = 0;
+        forever #5 clk = ~clk;
+    end
+
+    // 4. Reset & Simulation Sequence
+    initial begin
+        $display("==================================================");
+        $display("   POWERING UP 1000-CORE SOC...                   ");
+        $display("==================================================");
+
+        // Step A: Assert Reset (Hold the reset button down)
+        reset = 1'b1;
+        $display("[@%0t] Asserting Reset...", $time);
+        
+        // Wait for 4 clock cycles (40 nanoseconds)
+        #40;
+        
+        // Step B: Release Reset (Let the cores boot!)
+        reset = 1'b0;
+        $display("[@%0t] Reset Released. Cores are fetching instructions!", $time);
+
+        // Let the simulation run for 1000 nanoseconds to watch the FSMs cycle
+        #1000;
+
+        // Step C: End Simulation
+        $display("==================================================");
+        $display("   SIMULATION COMPLETE.                           ");
+        $display("==================================================");
+        $finish; // Stops the simulator
+    end
+
+    // 5. Waveform Dumper
+    // This creates a .vcd file that you can open in GTKWave to visually 
+    // see every single wire turning on and off in real-time.
+    initial begin
+        $dumpfile("soc_waveforms.vcd");
+        $dumpvars(0, tb_massive_soc);
+    end
+
+endmodule

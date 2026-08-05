@@ -1,0 +1,90 @@
+// ============================================================================
+// MODULE: Control Unit
+// DESCRIPTION: Decodes 32-bit RISC-V instructions and generates control 
+//              signals for the ALU, Register File, and Memory.
+// ============================================================================
+
+module control_unit (
+    input  logic [31:0] instruction,   // The raw 32-bit instruction fetched from memory
+    
+    // Control signals routing to other modules
+    output logic        reg_write_en,  // Tells the Register File to save data
+    output logic [3:0]  alu_op,        // Tells the ALU what operation to perform
+    output logic        alu_src,       // 0 = ALU uses rs2, 1 = ALU uses Immediate value
+    output logic        mem_read,      // Tells unified memory to read
+    output logic        mem_write,     // Tells unified memory to write
+    output logic        branch,        // Flags if this is a branch instruction
+    output logic        result_src     // 0 = Save ALU result, 1 = Save Memory data
+);
+
+    // Extract standard RISC-V fields from the instruction
+    logic [6:0] opcode;
+    logic [2:0] funct3;
+    logic [6:0] funct7;
+    
+    assign opcode = instruction[6:0];
+    assign funct3 = instruction[14:12];
+    assign funct7 = instruction[31:25];
+
+    // Standard RISC-V Base Opcodes
+    localparam OPCODE_R_TYPE = 7'b0110011; // ADD, SUB, AND, OR
+    localparam OPCODE_I_TYPE = 7'b0010011; // ADDI, ANDI
+    localparam OPCODE_LOAD   = 7'b0000011; // LD, LW
+    localparam OPCODE_STORE  = 7'b0100011; // SD, SW
+    localparam OPCODE_BRANCH = 7'b1100011; // BEQ, BNE
+
+    // Decode the opcode to set the system-wide control signals
+    always_comb begin
+        // Default everything to zero/safe states to prevent latches or accidental writes
+        reg_write_en = 1'b0;
+        alu_src      = 1'b0;
+        mem_read     = 1'b0;
+        mem_write    = 1'b0;
+        branch       = 1'b0;
+        result_src   = 1'b0;
+        alu_op       = 4'b0000; // Default to ADD
+
+        case (opcode)
+            OPCODE_R_TYPE: begin
+                reg_write_en = 1'b1;
+                alu_src      = 1'b0; // Use Register rs2
+                
+                // Determine exact math operation based on funct3 and funct7
+                if (funct3 == 3'b000 && funct7 == 7'b0000000) alu_op = 4'b0000; // ADD
+                else if (funct3 == 3'b000 && funct7 == 7'b0100000) alu_op = 4'b1000; // SUB
+                else if (funct3 == 3'b111) alu_op = 4'b0111; // AND
+                else if (funct3 == 3'b110) alu_op = 4'b0110; // OR
+            end
+
+            OPCODE_I_TYPE: begin
+                reg_write_en = 1'b1;
+                alu_src      = 1'b1; // Use Immediate value instead of rs2
+                
+                if (funct3 == 3'b000) alu_op = 4'b0000; // ADDI (Add Immediate)
+                else if (funct3 == 3'b111) alu_op = 4'b0111; // ANDI
+            end
+
+            OPCODE_LOAD: begin
+                reg_write_en = 1'b1;
+                alu_src      = 1'b1; // Immediate used for address offset
+                mem_read     = 1'b1;
+                result_src   = 1'b1; // Save data from memory to register, not ALU
+                alu_op       = 4'b0000; // ADD (base address + offset)
+            end
+
+            OPCODE_STORE: begin
+                alu_src      = 1'b1; // Immediate used for address offset
+                mem_write    = 1'b1;
+                alu_op       = 4'b0000; // ADD (base address + offset)
+            end
+
+            OPCODE_BRANCH: begin
+                branch       = 1'b1;
+                alu_op       = 4'b1000; // SUB (used to check if rs1 == rs2)
+            end
+            
+            default: ; // Do nothing for unsupported instructions
+        endcase
+    end
+
+endmodule

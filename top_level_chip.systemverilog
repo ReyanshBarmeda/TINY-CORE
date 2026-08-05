@@ -1,0 +1,51 @@
+// ============================================================================
+// MODULE: Top Level Chip
+// FILE: top_level_chip.systemverilog
+// DESCRIPTION: The motherboard. Instantiates 1000 cores and connects them 
+//              to the Unified Memory Controller via the mem_bus_if.
+// ============================================================================
+
+// 1. The Unified Memory Interface (The Wires)
+interface mem_bus_if;
+    logic [39:0]  addr;      // 40-bit physical address
+    logic [511:0] wdata;     // 512-bit write data
+    logic [511:0] rdata;     // 512-bit read data
+    logic         write_en;  // Write enable flag
+    logic         read_en;   // Read enable flag
+    logic         ready;     // Memory tells core the data is ready
+endinterface
+
+// 2. The Top Level Module
+module top_level_chip (
+    input logic clk,
+    input logic reset
+);
+    
+    localparam NUM_CORES = 1000;
+    
+    // Create an array of 1000 memory buses
+    mem_bus_if core_mem_connections[NUM_CORES]();
+
+    // Mathematically generate 1,000 distinct cores
+    genvar i;
+    generate
+        for (i = 0; i < NUM_CORES; i++) begin : core_array
+            custom_rv_core u_core (
+                .clk(clk),
+                .reset(reset),
+                .core_id(i[15:0]),                  
+                .mem(core_mem_connections[i])       
+            );
+        end
+    endgenerate
+
+    // Instantiate the massive Unified Memory Controller
+    unified_memory_controller #(
+        .NUM_CORES(NUM_CORES)
+    ) u_unified_mem (
+        .clk(clk),
+        .reset(reset),
+        .core_buses(core_mem_connections) 
+    );
+
+endmodule
