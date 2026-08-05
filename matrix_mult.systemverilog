@@ -1,0 +1,244 @@
+// ============================================================================
+// MODULE: Matrix Multiplier
+// FILE: matrix_mult.systemverilog
+// DESCRIPTION: Parameterized N x N fixed-point matrix multiplication engine.
+//              Computes C = A x B using a single shared MAC unit, sequenced
+//              by an i/j/k FSM. Included as a standalone accelerator since
+//              the base TINY CORE ALU has no MUL instruction — this module
+//              is meant to sit on the memory bus (or its own port) alongside
+//              the RISC-V cores, not run as core software.
+// ============================================================================
+
+module matrix_mult #(
+    parameter N          = 4,   // matrix dimension (N x N matrices)
+    parameter DATA_WIDTH = 64   // element width, matches core register width
+) (
+    input  logic clk,
+    input  logic reset,
+
+    // ------------------------------------------------------------------
+    // Load interface: write one element of A or B at a time
+    // ------------------------------------------------------------------
+    input  logic                        load_a,     // pulse to write matrix A
+    input  logic                        load_b,     // pulse to write matrix B
+    input  logic [$clog2(N)-1:0]        load_row,
+    input  logic [$clog2(N)-1:0]        load_col,
+    input  logic signed [DATA_WIDTH-1:0] load_data,
+
+    // ------------------------------------------------------------------
+    // Control
+    // ------------------------------------------------------------------
+    input  logic start,   // pulse to begin C = A x B
+    output logic busy,
+    output logic done,    // pulses high for one cycle when result is ready
+
+    // ------------------------------------------------------------------
+    // Read interface: read one element of C at a time
+    // ------------------------------------------------------------------
+    input  logic [$clog2(N)-1:0]         read_row,
+    input  logic [$clog2(N)-1:0]         read_col,
+    output logic signed [DATA_WIDTH-1:0] read_data
+);
+
+    // ------------------------------------------------------------------
+    // Storage: A, B, C matrices
+    // ------------------------------------------------------------------
+    logic signed [DATA_WIDTH-1:0] mat_a [0:N-1][0:N-1];
+    logic signed [DATA_WIDTH-1:0] mat_b [0:N-1][0:N-1];
+    logic signed [DATA_WIDTH-1:0] mat_c [0:N-1][0:N-1];
+
+    // Loading matrix A / B (independent of the compute FSM)
+    always_ff @(posedge clk) begin
+        if (load_a) mat_a[load_row][load_col] <= load_data;
+        if (load_b) mat_b[load_row][load_col] <= load_data;
+    end
+
+    // Reading matrix C is purely combinational
+    assign read_data = mat_c[read_row][read_col];
+
+    // ------------------------------------------------------------------
+    // Compute FSM: for each output element C[i][j], accumulate the dot
+    // product of row i of A and column j of B using one shared MAC.
+    // ------------------------------------------------------------------
+    typedef enum logic [1:0] {IDLE, COMPUTE, ADVANCE, DONE_ST} state_t;
+    state_t state;
+
+    logic [$clog2(N)-1:0] i_idx, j_idx, k_idx;
+    logic signed [2*DATA_WIDTH-1:0] accum; // extra headroom to avoid overflow
+
+    assign busy = (state != IDLE);
+
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            state  <= IDLE;
+            i_idx  <= '0;
+            j_idx  <= '0;
+            k_idx  <= '0;
+            accum  <= '0;
+            done   <= 1'b0;
+            for (int r = 0; r < N; r++)
+                for (int c = 0; c < N; c++)
+                    mat_c[r][c] <= '0;
+        end else begin
+            done <= 1'b0; // default; only pulses in DONE_ST
+
+            case (state)
+                IDLE: begin
+                    if (start) begin
+                        i_idx <= '0;
+                        j_idx <= '0;
+                        k_idx <= '0;
+                        accum <= '0;
+                        state <= COMPUTE;
+                    end
+                end
+
+                // One MAC step per cycle: accum += A[i][k] * B[k][j]
+                COMPUTE: begin
+                    accum <= accum + (mat_a[i_idx][k_idx] * mat_b[k_idx][j_idx]);
+
+                    if (k_idx == N-1) begin
+                        state <= ADVANCE;
+                    end else begin
+                        k_idx <= k_idx + 1'b1;
+                    end
+                end
+
+                // Store finished dot product, move to the next (i,j), or finish
+                ADVANCE: begin
+                    mat_c[i_idx][j_idx] <= accum[DATA_WIDTH-1:0]; // truncate back to element width
+                    k_idx <= '0;
+                    accum <= '0;
+
+                    if (j_idx == N-1) begin
+                        j_idx <= '0;
+                        if (i_idx == N-1) begin
+                            state <= DONE_ST;
+                        end else begin
+                            i_idx <= i_idx + 1'b1;
+                            state <= COMPUTE;
+                        end
+                    end else begin
+                        j_idx <= j_idx + 1'b1;
+                        state <= COMPUTE;
+                    end
+                end
+
+                DONE_ST: begin
+                    done  <= 1'b1;
+                    state <= IDLE;
+                end
+
+                default: state <= IDLE;
+            endcase
+        end
+    end
+
+endmodule
+
+
+// ============================================================================
+// MODULE: Matrix Multiplier Testbench
+// FILE: tb_matrix_mult.systemverilog
+// DESCRIPTION: Loads two small matrices, runs the multiplier, and checks the
+//              result against an expected value computed in the testbench.
+// ============================================================================
+
+module tb_matrix_mult;
+
+    localparam N          = 3;
+    localparam DATA_WIDTH = 64;
+
+    logic clk = 0;
+    logic reset;
+
+    logic                         load_a, load_b, start;
+    logic [$clog2(N)-1:0]         load_row, load_col, read_row, read_col;
+    logic signed [DATA_WIDTH-1:0] load_data;
+    logic signed [DATA_WIDTH-1:0] read_data;
+    logic                         busy, done;
+
+    matrix_mult #(.N(N), .DATA_WIDTH(DATA_WIDTH)) dut (
+        .clk(clk), .reset(reset),
+        .load_a(load_a), .load_b(load_b),
+        .load_row(load_row), .load_col(load_col), .load_data(load_data),
+        .start(start), .busy(busy), .done(done),
+        .read_row(read_row), .read_col(read_col), .read_data(read_data)
+    );
+
+    always #5 clk = ~clk;
+
+    // Reference matrices:
+    // A = [1 2 3; 4 5 6; 7 8 9]   B = [9 8 7; 6 5 4; 3 2 1]
+    int a_vals [0:N-1][0:N-1] = '{'{1,2,3}, '{4,5,6}, '{7,8,9}};
+    int b_vals [0:N-1][0:N-1] = '{'{9,8,7}, '{6,5,4}, '{3,2,1}};
+    int expected [0:N-1][0:N-1];
+
+    initial begin
+        // Compute expected result in software for checking
+        for (int i = 0; i < N; i++)
+            for (int j = 0; j < N; j++) begin
+                expected[i][j] = 0;
+                for (int k = 0; k < N; k++)
+                    expected[i][j] += a_vals[i][k] * b_vals[k][j];
+            end
+
+        reset = 1; load_a = 0; load_b = 0; start = 0;
+        load_row = 0; load_col = 0; load_data = 0;
+        read_row = 0; read_col = 0;
+        @(posedge clk); @(posedge clk);
+        reset = 0;
+
+        // Load A and B element by element
+        for (int i = 0; i < N; i++) begin
+            for (int j = 0; j < N; j++) begin
+                @(posedge clk);
+                load_a    = 1;
+                load_row  = i[$clog2(N)-1:0];
+                load_col  = j[$clog2(N)-1:0];
+                load_data = a_vals[i][j];
+            end
+        end
+        @(posedge clk);
+        load_a = 0;
+
+        for (int i = 0; i < N; i++) begin
+            for (int j = 0; j < N; j++) begin
+                @(posedge clk);
+                load_b    = 1;
+                load_row  = i[$clog2(N)-1:0];
+                load_col  = j[$clog2(N)-1:0];
+                load_data = b_vals[i][j];
+            end
+        end
+        @(posedge clk);
+        load_b = 0;
+
+        // Kick off the multiply
+        @(posedge clk);
+        start = 1;
+        @(posedge clk);
+        start = 0;
+
+        wait (done == 1);
+        @(posedge clk);
+
+        // Check every element
+        for (int i = 0; i < N; i++) begin
+            for (int j = 0; j < N; j++) begin
+                read_row = i[$clog2(N)-1:0];
+                read_col = j[$clog2(N)-1:0];
+                #1;
+                if (read_data !== expected[i][j])
+                    $display("MISMATCH at C[%0d][%0d]: got %0d, expected %0d",
+                              i, j, read_data, expected[i][j]);
+                else
+                    $display("OK C[%0d][%0d] = %0d", i, j, read_data);
+            end
+        end
+
+        $display("Matrix multiplication test complete.");
+        $finish;
+    end
+
+endmodule
