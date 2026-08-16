@@ -2,7 +2,7 @@
 
 A multi-core RISC-V (RV64) SoC implemented in SystemVerilog — 1,000 single-cycle-style cores sharing one unified memory, all connected through a round-robin memory arbiter.
 
-## Architecture
+## Architecture.
 
 ```
 top_level_chip
@@ -16,7 +16,7 @@ top_level_chip
 
 Cores connect to memory through a shared `mem_bus_if` interface: a 40-bit address, 512-bit read/write data, and read/write/ready handshake signals.
 
-## Modules
+## Modules.
 
 | File | Description |
 |---|---|
